@@ -15,10 +15,17 @@ Created on Thu Apr 12 09:13:06 2018
 import cx_Oracle as cxo
 import pandas as pd
 import re
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 
 date = '20180821'
+
+## mkt_gb / cap_size 지정 (예정)
+
+mkt_gb = "1"
+cap_size = "2"
+
 
 class data_provide:
 
@@ -60,7 +67,138 @@ class data_provide:
 
         return dt.set_index('TRD_DT')
 
+    def sql_stk_change(self, sql, mkt_gb = "1", cap_size = "2"):
+
+        mkt = "MKT_GB IN " + "(" + mkt_gb + ") "
+        cap = "MKT_CAP_SIZE IN " + "(" + cap_size + ")"
+
+        sql_chg = re.sub(pattern = "MKT_GB IN \(1\)", repl = mkt, string=sql)
+        sql_chg = re.sub(pattern="MKT_CAP_SIZE IN \(1\)", repl=cap, string=sql_chg)
+
+        return sql_chg
+
+    def sql_stk_universe(self, mkt_gb = "1", cap_size = "2"):
+
+        sql_1 = """
+           SELECT B.GICODE, B.ITEMABBRNM, B.FGSC_CD, A.U_NM
+           FROM 
+           (
+               SELECT U_CD, U_NM
+               FROM FNS_U_MAST
+               WHERE U_CD LIKE '%FGSC%'
+                     AND DEPTH = 4
+           ) A, 
+           (
+               SELECT GICODE, ITEMABBRNM, FGSC_CD
+               FROM FNS_J_MAST
+               WHERE 1=1 
+                     AND SUBSTR(GICODE, 7, 1) = '0'
+                     AND MKT_GB IN (1) 
+                     AND MKT_CAP_SIZE IN (2)
+            ) B
+            WHERE B.FGSC_CD = A.U_CD(+) 
+        """
+
+        mkt = " AND MKT_GB IN " + "(" + mkt_gb + ") "
+        cap = " AND MKT_CAP_SIZE IN " + "(" + cap_size + ")"
+
+        sql = self.sql_stk_change(sql_1, mkt_gb=mkt_gb, cap_size=cap_size)
+        dt = pd.read_sql(con=self.conn, sql=sql)
+
+        return {'data': dt, 'gicode': dt['GICODE']}
+
+    def sql_stk(self, mkt_gb = "1", cap_size = "2"):
+
+        sql ="""
+                SELECT A.GICODE
+                       , A.TRD_DT
+                       , A.STRT_PRC 
+                       , A.HIGH_PRC
+                       , A.LOW_PRC
+                       , A.CLS_PRC       
+                FROM 
+                (
+                    SELECT GICODE, TRD_DT
+                          , ADJ_STRT_PRC STRT_PRC
+                          , ADJ_HIGH_PRC HIGH_PRC
+                          , ADJ_LOW_PRC LOW_PRC
+                          , ADJ_PRC CLS_PRC      
+                    FROM FNS_JD_ADJ
+                    WHERE 1=1 
+                          AND ADJ_GB = 2
+                          AND SUBSTR(GICODE,1,1) = 'A'
+                          AND SUBSTR(GICODE,7,1) = '0'
+                          AND TRD_DT between '20150101' and '20170731'
+                          AND GICODE IN 
+                          (
+                            SELECT GICODE
+                            FROM FNS_J_MAST
+                            WHERE 1=1
+                                  AND SUBSTR(GICODE, 7, 1) = '0'
+                                  AND MKT_GB IN (1)
+                                  AND MKT_CAP_SIZE IN (2)          
+                          )
+                ) A, 
+                (
+                    SELECT B.GICODE, B.ITEMABBRNM, B.FGSC_CD, A.U_NM
+                    FROM 
+                    (
+                        SELECT U_CD, U_NM
+                        FROM FNS_U_MAST
+                        WHERE U_CD LIKE '%FGSC%'
+                              AND DEPTH = 4
+                    ) A, 
+                    (
+                        SELECT GICODE, ITEMABBRNM, FGSC_CD
+                        FROM FNS_J_MAST
+                        WHERE 1=1
+                              AND SUBSTR(GICODE, 7, 1) = '0'
+                              AND MKT_GB IN (1)
+                              AND MKT_CAP_SIZE IN (2)
+                    ) B
+                    WHERE B.FGSC_CD = A.U_CD(+) 
+                ) B
+                WHERE A.GICODE = B.GICODE
+            """
+
+        sql = self.sql_stk_change(sql, mkt_gb=mkt_gb, cap_size=cap_size)
+        qry = self.sql_date_change(sql)
+
+        dt = pd.read_sql(con = self.conn, sql = qry)
+        dt['TRD_DT'] = pd.to_datetime(dt['TRD_DT'])
+
+        return dt.sort_values(['GICODE', 'TRD_DT']).set_index('TRD_DT')
+
     ## 후에 종목분석추가
+
+class Return_Analysis:
+
+    """
+    This objects analyse the return on each calender day
+    or
+    day of the date
+    For your information, please use close prices
+    """
+
+    def __init__(self, data):
+
+        # Data: cls_data
+        self.rt = data.pct_change()
+
+    def data_prep(self):
+
+        data = self.rt
+        data.rt['a'] = data.rt.index.year
+        data.rt['m'] = data.rt.index.month
+        data.rt['date'] = data.rt.index.date
+        data.rt['wd'] = data.rt.index.weekday
+
+        return data.reset_index().drop('TRD_DT', axis = 1)
+
+    def day_of_return(self):
+
+        pass
+
 
 class tech_analysis_price:
 
@@ -94,6 +232,10 @@ class tech_analysis_price:
         cond_2 = self.candle_color()
 
         return cond_1 & cond_2
+
+    """
+    5일 이평에 붙는 패턴 가즈아!
+    """
 
 
     def mvg_cross_over(self, win1, win2, tpe = 'golden', mvg_type = 'ema'):
@@ -132,7 +274,7 @@ class tech_analysis_price:
 
         return cond1 & cond2
 
-    def value_zone(self, win1 = 5, win2 = 20):
+    def value_zone(self, win1 = 5, win2 = 20, strong = True):
 
         """
         :param win1: 20 day moving avg
@@ -141,11 +283,14 @@ class tech_analysis_price:
         :return:
         """
 
-        cond1 = self.strt_prc >= self.moving_avg(win = win2)
+        cond1 = (self.strt_prc >= self.moving_avg(win = win2)) | (self.strt_prc < self.moving_avg(win = win2))
         cond2 = self.cls_prc <= self.moving_avg(win = win1)
-        cond3 = self.candle_color()
 
-        return cond1 & cond2 & cond3
+        if strong:
+            cond3 = self.candle_color()
+            return cond1 & cond2 & cond3
+        else:
+            return cond1 & cond2
 
     def macd(self, win1 = 12, win2 = 26, sig = 9):
 
@@ -227,16 +372,85 @@ class money_management:
 
         return round(dol_risk / lag_loss)
 
-sql_kspi = """
-select trd_dt, strt_prc, high_prc, low_prc, cls_prc 
-from FNS_UD
-where trd_dt between '20150101' and '20170731' and 
-u_cd in ('I.001')
+"""
+Back Test Tools 
+
+If the price is moving up after the signal, 
+
+then Get in.
 """
 
-a = data_provide('20100101', '20180530')
-test_dt = a.index_sql_collect(sql_kspi, "'I.201'")
+sql_test_1 = """
+SELECT A.GICODE, B.ITEMABBRNM, A.TRD_DT, B.U_NM
+       , A.STRT_PRC 
+       , A.HIGH_PRC
+       , A.LOW_PRC
+       , A.CLS_PRC       
+FROM 
+(
+    SELECT GICODE, TRD_DT
+          , ADJ_STRT_PRC STRT_PRC
+          , ADJ_HIGH_PRC HIGH_PRC
+          , ADJ_LOW_PRC LOW_PRC
+          , ADJ_PRC CLS_PRC      
+    FROM FNS_JD_ADJ
+    WHERE 1=1 
+          AND ADJ_GB = 2
+          AND SUBSTR(GICODE,1,1) = 'A'
+          AND SUBSTR(GICODE,7,1) = '0'
+          AND TRD_DT between '20170101' and '20170131'
+          AND GICODE IN 
+          (
+            SELECT GICODE
+            FROM FNS_J_MAST
+            WHERE 1=1
+                  AND SUBSTR(GICODE, 7, 1) = '0'
+                  AND MKT_GB IN (1)
+                  AND MKT_CAP_SIZE = 2          
+          )
+) A, 
+(
+    SELECT B.GICODE, B.ITEMABBRNM, B.FGSC_CD, A.U_NM
+    FROM 
+    (
+        SELECT U_CD, U_NM
+        FROM FNS_U_MAST
+        WHERE U_CD LIKE '%FGSC%'
+              AND DEPTH = 4
+    ) A, 
+    (
+        SELECT GICODE, ITEMABBRNM, FGSC_CD
+        FROM FNS_J_MAST
+        WHERE 1=1
+              AND SUBSTR(GICODE, 7, 1) = '0'
+              AND MKT_GB IN (1)
+              AND MKT_CAP_SIZE = 2
+    ) B
+    WHERE B.FGSC_CD = A.U_CD(+) 
+) B
+WHERE A.GICODE = B.GICODE
+"""
 
+
+
+
+a = data_provide('20180101', '20180110')
+dt = a.sql_stk()
+
+dt.sort_index()
+a.sql_stk_universe(mkt_gb = "1", cap_size = "2")
+pd.read_sql(sql = sql_test, con=a.conn)
+
+def stk_date_creator(st_date, ed_date):
+
+
+
+
+A = pd.date_range('20180101', '20180530', freq = 'MS')
+B = pd.date_range('20180101', '20180531', freq = 'M')
+
+for st, ed in zip(A, B):
+    print("between TRD_DT " + st.strftime('%Y%m%d'), "AND " + ed.strftime('%Y%m%d'))
 
 
 
